@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.25;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+// Import UniswapV3 Router interface
+interface IUniswapV3Router {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactInputSingle(ExactInputSingleParams memory params) external returns (uint256[] memory amounts);
+    function ETH() external view returns (address);
+}
+
+// Import 1inch Router interface
+interface IOneInchRouter {
+    function swap(
+        address fromToken,
+        address toToken,
+        uint256 amount,
+        uint256 minReturn,
+        uint256[] calldata distribution
+    ) external payable returns (uint256 returnAmount);
+}
+
+// Import Sushiswap Router interface
+interface ISushiswapRouter {
+    function swapExactTokensForETH(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+
+    function ETH() external view returns (address);
+}
+
+// Import Balancer Pool interface
+interface IBalancerPool {
+    function flashLoan(address recipient, address token, uint256 amount, bytes calldata data) external;
+    function repay(address token, uint256 amount) external;
+}
+
+contract ArbitrageBot is Ownable {
+    address public balancerPoolAddr;
+    address public WBTC;
+    address public ETH;
+    address public uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+    address public oneInchRouterAddress = 0x11111112542D85B3EF69AE05771c2dCCff4fAa26;
+    address public sushiswapRouterAddress = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+
+    uint256 private constant AMOUNT_BORROWED = 250000; // Amount borrowed in WBTC
+
+    modifier onlyBotOrOwner() {
+        require(msg.sender == botAddress || msg.sender == owner(), "Caller is not the bot or owner");
+        _;
+    }
+
+    address public botAddress;
+
+    event FlashLoanTaken(address recipient, address token, uint256 amount);
+    event FlashLoanRepaid(address token, uint256 amount);
+    event ProfitPaid(address recipient, uint256 amount);
+    event SwapExecuted(address fromToken, address toToken, uint256 amountIn, uint256 amountOut);
+
+    constructor() Ownable(msg.sender) {
+        balancerPoolAddr = 0xBA12222222228d8Ba445958a75a0704d566BF2C8; // Balancer pool address
+        WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599; // WBTC address
+        ETH = address(0); // ETH address
+
+        // Set bot address
+        botAddress = 0x2e388E06046605BCDedBD8D2aCEb82ca70d08028;
+    }
+
+   // Function to take a flash loan and start the arbitrage
+function performArbitrage () external onlyBotOrOwner {
+    // Call Balancer flash loan function with zero WBTC balance check
+    bytes memory data;
+    IBalancerPool(balancerPoolAddr).flashLoan(address(this), WBTC, AMOUNT_BORROWED, data);
+
+
+    emit FlashLoanTaken(address(this), WBTC, AMOUNT_BORROWED);
+}
+    // Function to execute arbitrage after the flash loan
+    function executeArbitrage(uint256 _amountIn, address _tokenOut) external onlyBotOrOwner {
+        // Execute arbitrage logic based on market conditions
+        if (_tokenOut == ETH) {
+            _uniswapV3Trade(_amountIn);
+            _oneInchTrade(_amountIn);
+            _sushiswapTrade(_amountIn);
+        } else if (_tokenOut == address(0)) {
+            _oneInchTrade(_amountIn);
+            _sushiswapTrade(_amountIn);
+        } else {
+            revert("Unsupported tokenOut");
+        }
+
+        // Repay the flash loan
+        IBalancerPool(balancerPoolAddr).repay(WBTC, AMOUNT_BORROWED);
+
+        emit FlashLoanRepaid(WBTC, AMOUNT_BORROWED);
+    }
+
+    // Withdraw ETH from the contract - only bot or owner
+    function withdrawEth() external onlyBotOrOwner {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "Contract balance is zero");
+        payable(owner()).transfer(balance);
+    }
+
+    // Withdraw tokens from the contract - only bot or owner
+    function withdrawToken(address _token, uint256 _amount) external onlyBotOrOwner {
+        require(_amount > 0, "Amount must be greater than zero");
+        require(IERC20(_token).balanceOf(address(this)) >= _amount, "Insufficient token balance");
+        IERC20(_token).transfer(owner(), _amount);
+    }
+
+    // Function to set the bot address - only owner
+    function setBotAddress(address _botAddress) external onlyOwner {
+        botAddress = _botAddress;
+    }
+
+    // Function to swap tokens using UniswapV3
+    function _uniswapV3Trade(uint256 _amountIn) internal {
+        // Implement Uniswap V3 trade logic
+        // This function should swap WBTC for ETH on UniswapV3
+        // and emit the SwapExecuted event
+        IUniswapV3Router.ExactInputSingleParams memory params = IUniswapV3Router.ExactInputSingleParams({
+            tokenIn: WBTC,
+            tokenOut: ETH,
+            fee: 3000,
+            recipient: address(this),
+            deadline: block.timestamp + 300,
+            amountIn: _amountIn,
+            amountOutMinimum: 0,
+            sqrtPriceLimitX96: 0
+        });
+
+        uint256[] memory amounts = IUniswapV3Router(uniswapRouterAddress).exactInputSingle(params);
+        emit SwapExecuted(WBTC, ETH, _amountIn, amounts[1]);
+    }
+
+    // Function to swap tokens using 1inch
+    function _oneInchTrade(uint256 _amountIn) internal {
+        // Implement 1inch trade logic
+        // This function should swap WBTC for ETH on 1inch
+        // and emit the SwapExecuted event
+        uint256[] memory distribution;
+        uint256 returnAmount = IOneInchRouter(oneInchRouterAddress).swap(
+            WBTC,
+            address(0),
+            _amountIn,
+            1,
+            distribution
+        );
+        emit SwapExecuted(WBTC, address(0), _amountIn, returnAmount);
+    }
+
+    // Function to swap tokens using Sushiswap
+    function _sushiswapTrade(uint256 _amountIn) internal {
+        // Implement Sushiswap trade logic
+        // This function should swap WBTC for ETH on Sushiswap
+        // and emit the SwapExecuted event
+        address[] memory path = new address[](2);
+        path[0] = WBTC;
+        path[1] = ETH;
+
+        uint[] memory amounts = ISushiswapRouter(sushiswapRouterAddress).swapExactTokensForETH(
+            _amountIn,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+        emit SwapExecuted(WBTC, ETH, _amountIn, amounts[1]);
+    }
+}
